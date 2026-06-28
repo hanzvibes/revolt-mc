@@ -1,0 +1,2 @@
+- [Revolt Riders port conflict fix](revolt-riders-port-fix.md) — fuser -k the port before vite starts to avoid "port in use" crash on workflow restart; artifact port is 21543.
+- [Revolt Riders design tokens](revolt-riders-design-tokens.md) — contrast-safe text token hierarchy and CSS class conventions for this app.

@@ -1,0 +1,865 @@
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useRiders } from "@/lib/useRiders";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Users2, Navigation2, Activity, Flame, Timer, Gem,
+  Search, ArrowDownToLine, ChevronUp, ChevronDown, X,
+  ChevronRight, SlidersHorizontal, LayoutGrid, Rows3,
+  Megaphone, AlertTriangle, Info, PartyPopper, Pin, ArrowRight,
+} from "lucide-react";
+import { Link } from "wouter";
+import { useAnnouncements } from "@/lib/announcements";
+import {
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, BarChart, Bar, Cell,
+} from "recharts";
+import { toast } from "sonner";
+import { supabase } from "@/lib/supabase";
+import { numFmt, parseRuns, cn } from "@/lib/utils";
+import type { Rider } from "@/lib/types";
+import { Topbar } from "@/components/layout/Topbar";
+
+const JABATAN_LIST = [
+  "FOUNDER", "PRESIDENT", "EXCECUTOR", "NEGOSIATOR",
+  "LIFE MEMBER", "VIRGIN", "CAPROS", "PROSPEK",
+];
+
+type SortKey = "no" | "nama" | "alamat" | "ttl" | "bergabung" | "jabatan" | "total_km" | "runs";
+type SortDir = "asc" | "desc";
+
+function rankBadgeClass(jabatan: string): string {
+  const j = jabatan?.toUpperCase();
+  if (j === "FOUNDER") return "badge-red";
+  if (j === "PRESIDENT") return "badge-yellow";
+  if (j === "EXCECUTOR") return "badge-purple";
+  if (j === "NEGOSIATOR") return "badge-blue";
+  if (j === "LIFE MEMBER") return "badge-cyan";
+  if (j === "VIRGIN") return "badge-green";
+  if (j === "CAPROS") return "badge-yellow";
+  return "badge-gray";
+}
+
+/* ── Animated counter ─────────────────────────────────────────── */
+function AnimatedNumber({ value }: { value: number }) {
+  const [display, setDisplay] = useState(0);
+  const ref = useRef(value);
+  useEffect(() => {
+    const end = value;
+    const duration = 900;
+    const startTime = performance.now();
+    function tick(now: number) {
+      const elapsed = now - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setDisplay(Math.round(end * eased));
+      if (progress < 1) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+    ref.current = value;
+  }, [value]);
+  return <span>{display.toLocaleString("id-ID")}</span>;
+}
+
+/* ── Sparkline ──────────────────────────────────────────────────── */
+function Sparkline({ data }: { data: number[] }) {
+  const pts = data.map((v, i) => ({ v, i }));
+  return (
+    <ResponsiveContainer width="100%" height={32}>
+      <AreaChart data={pts} margin={{ top: 2, right: 0, left: 0, bottom: 0 }}>
+        <defs>
+          <linearGradient id="sparkGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#8B5CF6" stopOpacity={0.4} />
+            <stop offset="100%" stopColor="#8B5CF6" stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <Area type="monotone" dataKey="v" stroke="#8B5CF6" strokeWidth={1.5}
+          fill="url(#sparkGrad)" dot={false} isAnimationActive={false} />
+      </AreaChart>
+    </ResponsiveContainer>
+  );
+}
+
+/* ── Stat card ──────────────────────────────────────────────────── */
+type StatColor = "purple" | "green" | "blue" | "amber" | "red" | "cyan";
+
+const COLOR_TEXT: Record<StatColor, string> = {
+  purple: "#C4B5FD", green: "#4ADE80", blue: "#93C5FD",
+  amber: "#FCD34D", red: "#FCA5A5", cyan: "#67E8F9",
+};
+const COLOR_SUFFIX: Record<StatColor, string> = {
+  purple: "#8B5CF6", green: "#22C55E", blue: "#3B82F6",
+  amber: "#F59E0B", red: "#EF4444", cyan: "#06B6D4",
+};
+
+interface StatCardProps {
+  label: string; value: number; suffix?: string; sub?: string;
+  icon: React.ElementType; color?: StatColor; sparkline?: number[]; delay?: number;
+}
+function StatCard({ label, value, suffix = "", sub, icon: Icon, color, sparkline, delay = 0 }: StatCardProps) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25, delay }}
+      className={cn("glass-card p-4 md:p-5 flex flex-col gap-3 relative overflow-hidden", color && `stat-card-${color}`)}
+    >
+      <div className={cn("stat-accent-line", color ?? "purple")} />
+      <div className="flex items-start justify-between">
+        <div className={cn("flex h-8 w-8 items-center justify-center rounded-lg", color ? `icon-badge-${color}` : "icon-badge-purple")}>
+          <Icon size={15} />
+        </div>
+        {sub && (
+          <span className="text-[0.62rem] text-[#52525B] font-medium uppercase tracking-wider truncate max-w-[80px] text-right leading-tight">
+            {sub}
+          </span>
+        )}
+      </div>
+      <div>
+        <p className="card-label mb-1.5">{label}</p>
+        <div className="flex items-baseline gap-1.5">
+          <p
+            className={cn("font-extrabold leading-none tracking-tight", value > 9999 ? "text-[1.5rem] md:text-[1.7rem]" : "text-[1.7rem] md:text-[2rem]")}
+            style={{ color: color ? COLOR_TEXT[color] : "#fff", fontVariantNumeric: "tabular-nums", letterSpacing: "-0.04em" }}
+          >
+            <AnimatedNumber value={value} />
+          </p>
+          {suffix && (
+            <span className="text-[0.7rem] font-semibold" style={{ color: color ? COLOR_SUFFIX[color] : "#52525B" }}>
+              {suffix.trim()}
+            </span>
+          )}
+        </div>
+      </div>
+      {sparkline && <Sparkline data={sparkline} />}
+    </motion.div>
+  );
+}
+
+/* ── Chart tooltip ──────────────────────────────────────────────── */
+function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: { value: number }[]; label?: string }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="rounded-xl border border-[rgba(39,39,42,0.8)] bg-[#1E1E1E] px-3 py-2 shadow-xl">
+      {label && <p className="mb-0.5 text-[0.65rem] text-[#71717A]">{label}</p>}
+      <p className="text-sm font-semibold text-white">{numFmt(payload[0].value)} km</p>
+    </div>
+  );
+}
+
+/* ── Rider card (mobile view) ───────────────────────────────────── */
+function RiderCard({ rider, onClick }: { rider: Rider; onClick: () => void }) {
+  const runs = parseRuns(rider.aktivitas);
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.15 }}
+      className="glass-card p-4 cursor-pointer"
+      onClick={onClick}
+    >
+      <div className="flex items-start justify-between gap-2 mb-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#7C3AED]/20 to-[#A855F7]/10 text-[0.72rem] font-bold text-[#8B5CF6]">
+            #{rider.no}
+          </div>
+          <div className="min-w-0">
+            <p className="text-[0.85rem] font-semibold text-white truncate">{rider.nama}</p>
+            <p className="text-[0.7rem] text-[#71717A] truncate">{rider.alamat || "—"}</p>
+          </div>
+        </div>
+        <div className="flex-shrink-0 text-right">
+          <p className="text-[0.95rem] font-bold text-[#8B5CF6]">{numFmt(rider.total_km || 0)}</p>
+          <p className="text-[0.6rem] text-[#52525B]">km</p>
+        </div>
+      </div>
+      <div className="flex items-center justify-between">
+        <span className={rankBadgeClass(rider.jabatan)}>{rider.jabatan}</span>
+        <div className="flex items-center gap-3 text-[0.65rem] text-[#71717A]">
+          <span>{runs.length} runs</span>
+          {rider.bergabung && <span>Patched {rider.bergabung}</span>}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+/* ── Runs expand cell ──────────────────────────────────────────── */
+function RunsCell({ aktivitas }: { aktivitas: string }) {
+  const [open, setOpen] = useState(false);
+  const runs = parseRuns(aktivitas);
+  if (!runs.length) return <span className="text-[#71717A]">—</span>;
+  return (
+    <div>
+      <button
+        className="flex items-center gap-1 text-[0.75rem] text-[#A1A1AA] hover:text-[#8B5CF6] transition-colors"
+        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+      >
+        {runs.length}
+        {open ? <ChevronUp size={11} /> : <ChevronRight size={11} />}
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2 }} className="overflow-hidden">
+            <div className="mt-1 space-y-0.5">
+              {runs.map((r, i) => (
+                <div key={i} className="flex items-center justify-between rounded-lg px-2 py-1 bg-[rgba(139,92,246,0.06)]">
+                  <span className="text-[0.62rem] text-[#71717A] truncate max-w-[100px]">{r.nama}</span>
+                  <span className="text-[0.62rem] font-medium text-[#8B5CF6] ml-1.5">{numFmt(r.km)}</span>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+/* ── Filter drawer (mobile) ─────────────────────────────────────── */
+function FilterDrawer({
+  open, onClose, filterJabatan, setFilterJabatan,
+  filterTahun, setFilterTahun, tahunList,
+}: {
+  open: boolean; onClose: () => void;
+  filterJabatan: string; setFilterJabatan: (v: string) => void;
+  filterTahun: string; setFilterTahun: (v: string) => void;
+  tahunList: string[];
+}) {
+  return (
+    <AnimatePresence>
+      {open && (
+        <>
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+          <motion.div
+            initial={{ y: "100%" }} animate={{ y: 0 }} exit={{ y: "100%" }}
+            transition={{ type: "tween", duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+            className="fixed bottom-0 left-0 right-0 z-50 rounded-t-2xl border-t border-[rgba(39,39,42,0.8)] bg-[#111111] p-5 space-y-5"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-[0.88rem] font-semibold text-white">Filters</h3>
+              <button onClick={onClose} className="btn-ghost h-8 w-8 flex items-center justify-center p-0">
+                <X size={16} />
+              </button>
+            </div>
+            <div>
+              <label className="text-[0.7rem] font-medium uppercase tracking-wider text-[#71717A] mb-2 block">Rank</label>
+              <div className="flex flex-wrap gap-2">
+                {["", ...JABATAN_LIST].map((j) => (
+                  <button key={j}
+                    onClick={() => setFilterJabatan(j)}
+                    className={cn(
+                      "px-3 py-1.5 rounded-full text-[0.72rem] font-medium border transition-all",
+                      filterJabatan === j
+                        ? "bg-[#8B5CF6] border-[#8B5CF6] text-white"
+                        : "border-[rgba(39,39,42,0.8)] text-[#71717A] hover:border-[#8B5CF6]/40"
+                    )}
+                  >{j || "All Ranks"}</button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="text-[0.7rem] font-medium uppercase tracking-wider text-[#71717A] mb-2 block">Year Joined</label>
+              <div className="flex flex-wrap gap-2">
+                {["", ...tahunList].map((y) => (
+                  <button key={y}
+                    onClick={() => setFilterTahun(y)}
+                    className={cn(
+                      "px-3 py-1.5 rounded-full text-[0.72rem] font-medium border transition-all",
+                      filterTahun === y
+                        ? "bg-[#8B5CF6] border-[#8B5CF6] text-white"
+                        : "border-[rgba(39,39,42,0.8)] text-[#71717A] hover:border-[#8B5CF6]/40"
+                    )}
+                  >{y || "All Years"}</button>
+                ))}
+              </div>
+            </div>
+            {(filterJabatan || filterTahun) && (
+              <button onClick={() => { setFilterJabatan(""); setFilterTahun(""); onClose(); }}
+                className="w-full btn-ghost py-2.5 text-[0.8rem] text-red-400">
+                Clear All Filters
+              </button>
+            )}
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+  );
+}
+
+/* ── Rider modal ────────────────────────────────────────────────── */
+function RiderModal({ rider, onClose }: { rider: Rider; onClose: () => void }) {
+  const runs = parseRuns(rider.aktivitas);
+  const totalKm = runs.reduce((s, r) => s + r.km, 0);
+  const avgKm = runs.length > 0 ? Math.round(totalKm / runs.length) : 0;
+  const topRun = runs.length > 0 ? Math.max(...runs.map((r) => r.km)) : 0;
+
+  useEffect(() => {
+    const fn = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", fn);
+    return () => window.removeEventListener("keydown", fn);
+  }, [onClose]);
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        transition={{ duration: 0.18 }}
+        className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+        style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(12px)" }}
+        onClick={onClose}
+      >
+        <motion.div
+          initial={{ y: 32, opacity: 0, scale: 0.97 }}
+          animate={{ y: 0, opacity: 1, scale: 1 }}
+          exit={{ y: 24, opacity: 0, scale: 0.97 }}
+          transition={{ type: "tween", duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+          className="relative w-full sm:max-w-md overflow-hidden rounded-t-2xl sm:rounded-2xl max-h-[92dvh] overflow-y-auto"
+          style={{
+            background: "linear-gradient(160deg, #161616 0%, #111111 100%)",
+            border: "1px solid rgba(255,255,255,0.09)",
+            boxShadow: "0 32px 80px rgba(0,0,0,0.7), 0 0 0 1px rgba(139,92,246,0.08) inset",
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Top shimmer */}
+          <div className="absolute top-0 left-0 right-0 h-px"
+            style={{ background: "linear-gradient(to right, transparent, rgba(139,92,246,0.6), transparent)" }} />
+
+          {/* Drag handle on mobile */}
+          <div className="flex justify-center pt-3 pb-1 sm:hidden">
+            <div className="h-1 w-10 rounded-full" style={{ background: "rgba(255,255,255,0.1)" }} />
+          </div>
+
+          {/* Header */}
+          <div className="relative px-5 py-5 border-b" style={{ borderColor: "rgba(255,255,255,0.06)", background: "linear-gradient(135deg, rgba(124,58,237,0.12) 0%, transparent 60%)" }}>
+            <button
+              onClick={onClose}
+              className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-lg transition-all"
+              style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.07)", color: "#71717A" }}
+            >
+              <X size={14} />
+            </button>
+            <div className="flex items-center gap-3.5">
+              <div
+                className="flex h-12 w-12 items-center justify-center rounded-2xl text-[0.8rem] font-black text-white flex-shrink-0"
+                style={{
+                  background: "linear-gradient(135deg, #7C3AED 0%, #A855F7 100%)",
+                  boxShadow: "0 0 20px rgba(139,92,246,0.4), inset 0 1px 0 rgba(255,255,255,0.15)",
+                }}
+              >
+                {rider.no}
+              </div>
+              <div>
+                <h2 className="text-[1rem] font-bold text-white pr-8 leading-tight">{rider.nama}</h2>
+                <div className="mt-1 flex items-center gap-2">
+                  <span className={rankBadgeClass(rider.jabatan)}>{rider.jabatan}</span>
+                  {rider.alamat && (
+                    <span className="text-[0.62rem] text-[#52525B]">· {rider.alamat}</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="px-5 py-4 space-y-4">
+            {/* KM hero */}
+            <div
+              className="rounded-2xl p-4 text-center relative overflow-hidden"
+              style={{
+                background: "linear-gradient(135deg, rgba(124,58,237,0.15) 0%, rgba(139,92,246,0.06) 100%)",
+                border: "1px solid rgba(139,92,246,0.22)",
+              }}
+            >
+              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-24 h-px"
+                style={{ background: "linear-gradient(to right, transparent, rgba(168,85,247,0.6), transparent)" }} />
+              <p className="text-[0.58rem] font-semibold uppercase tracking-[0.12em] text-[#8B5CF6] mb-1.5">Total Distance</p>
+              <p className="font-black text-white leading-none" style={{ fontSize: "2.6rem", letterSpacing: "-0.05em", fontVariantNumeric: "tabular-nums" }}>
+                {numFmt(rider.total_km)}
+              </p>
+              <p className="text-[0.78rem] text-[#8B5CF6] font-semibold mt-0.5">kilometers</p>
+            </div>
+
+            {/* Mini stats */}
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { label: "Runs", value: runs.length, suffix: "" },
+                { label: "Avg / Run", value: avgKm, suffix: " km" },
+                { label: "Best Run", value: topRun, suffix: " km" },
+              ].map(({ label, value, suffix }) => (
+                <div key={label} className="rounded-xl p-3 text-center"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}>
+                  <p className="text-[0.58rem] uppercase tracking-widest text-[#52525B] mb-1">{label}</p>
+                  <p className="text-[0.92rem] font-bold text-white" style={{ fontVariantNumeric: "tabular-nums" }}>
+                    {numFmt(value)}{suffix}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            {/* Info grid */}
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { label: "Chapter", value: rider.alamat },
+                { label: "Date of Birth", value: rider.ttl },
+                { label: "Patched", value: rider.bergabung },
+                { label: "Rank", value: rider.jabatan },
+              ].map(({ label, value }) => (
+                <div key={label} className="rounded-xl p-3"
+                  style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.055)" }}>
+                  <p className="text-[0.62rem] font-medium uppercase tracking-[0.08em] text-[#71717A] mb-0.5">{label}</p>
+                  <p className="text-[0.78rem] text-[#A1A1AA] font-medium break-words">{value || "—"}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Run log */}
+            {runs.length > 0 && (
+              <div>
+                <p className="mb-2 text-[0.65rem] font-semibold uppercase tracking-[0.1em] text-[#71717A]">
+                  Run Log <span className="text-[#52525B]">({runs.length})</span>
+                </p>
+                <div className="rounded-2xl overflow-hidden" style={{ border: "1px solid rgba(255,255,255,0.06)" }}>
+                  {runs.map((r, i) => (
+                    <div
+                      key={i}
+                      className="flex items-center justify-between px-4 py-2.5 transition-colors"
+                      style={{
+                        borderBottom: i < runs.length - 1 ? "1px solid rgba(255,255,255,0.04)" : "none",
+                        background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.01)",
+                      }}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <span className="text-[0.62rem] font-bold text-[#52525B] flex-shrink-0 w-5 text-right">
+                          {String(i + 1).padStart(2, "0")}
+                        </span>
+                        <span className="text-[0.76rem] text-[#A1A1AA] truncate">{r.nama}</span>
+                      </div>
+                      <span className="text-[0.76rem] font-semibold text-[#8B5CF6] flex-shrink-0 ml-2 tabular-nums">
+                        {numFmt(r.km)} km
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>
+  );
+}
+
+/* ── Announcement Banner ─────────────────────────────────────── */
+const ANN_TYPE_CONFIG = {
+  info: { icon: Info, color: "text-blue-400", bg: "rgba(59,130,246,0.08)", border: "rgba(59,130,246,0.2)" },
+  event: { icon: PartyPopper, color: "text-purple-400", bg: "rgba(168,85,247,0.08)", border: "rgba(168,85,247,0.2)" },
+  urgent: { icon: AlertTriangle, color: "text-red-400", bg: "rgba(239,68,68,0.08)", border: "rgba(239,68,68,0.2)" },
+};
+
+function AnnouncementBanner() {
+  const { announcements } = useAnnouncements();
+  const latest = announcements[0];
+  if (!latest) return null;
+  const cfg = ANN_TYPE_CONFIG[latest.type];
+  const Icon = cfg.icon;
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="mb-5 rounded-2xl flex items-center gap-3 px-4 py-3 cursor-default"
+      style={{ background: cfg.bg, border: `1px solid ${cfg.border}` }}
+    >
+      <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg" style={{ background: cfg.bg }}>
+        <Icon size={13} className={cfg.color} />
+      </div>
+      {latest.pinned && <Pin size={10} className="text-amber-400 flex-shrink-0" />}
+      <div className="flex-1 min-w-0">
+        <span className="text-[0.78rem] font-semibold text-white">{latest.title}</span>
+        <span className="text-[0.73rem] text-[#71717A] ml-2 line-clamp-1">{latest.body}</span>
+      </div>
+      <Link href="/announcements" className={`flex items-center gap-1 text-[0.68rem] font-medium flex-shrink-0 transition-opacity hover:opacity-70 ${cfg.color}`}>
+        View all <ArrowRight size={11} />
+      </Link>
+    </motion.div>
+  );
+}
+
+/* ── Skeleton ──────────────────────────────────────────────────── */
+function SkeletonCard() {
+  return (
+    <div className="glass-card p-4 md:p-5 space-y-3">
+      <div className="skeleton h-9 w-9 rounded-xl" />
+      <div className="skeleton h-3 w-16 rounded" />
+      <div className="skeleton h-6 w-24 rounded" />
+      <div className="skeleton h-8 w-full rounded" />
+    </div>
+  );
+}
+
+/* ── Dashboard ─────────────────────────────────────────────────── */
+export default function Dashboard({ onMenuOpen }: { onMenuOpen?: () => void }) {
+  const { riders, loading, error, refresh: fetchRiders } = useRiders();
+  const [search, setSearch] = useState("");
+  const [filterJabatan, setFilterJabatan] = useState("");
+  const [filterTahun, setFilterTahun] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("no");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [selectedRider, setSelectedRider] = useState<Rider | null>(null);
+  const [viewMode, setViewMode] = useState<"table" | "cards">("table");
+  const [filterOpen, setFilterOpen] = useState(false);
+
+  useEffect(() => {
+    const fn = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "e") { e.preventDefault(); handleExport(); }
+      if (e.key === "Escape") setSelectedRider(null);
+    };
+    window.addEventListener("keydown", fn);
+    return () => window.removeEventListener("keydown", fn);
+  }, [riders]);
+
+  const stats = useMemo(() => {
+    if (!riders.length) return null;
+    const totalKm = riders.reduce((s, r) => s + (r.total_km || 0), 0);
+    const avgKm = Math.round(totalKm / riders.length);
+    const topRider = [...riders].sort((a, b) => b.total_km - a.total_km)[0];
+    const runs = riders.reduce((s, r) => s + parseRuns(r.aktivitas).length, 0);
+    const founders = riders.filter((r) => r.jabatan?.toUpperCase() === "FOUNDER").length;
+    return { totalKm, avgKm, topRider, runs, founders };
+  }, [riders]);
+
+  const sparklineKm = useMemo(() =>
+    [...riders].sort((a, b) => a.total_km - b.total_km).slice(-10).map((r) => r.total_km || 0),
+  [riders]);
+
+  const areaData = useMemo(() =>
+    [...riders].sort((a, b) => b.total_km - a.total_km).slice(0, 15).map((r) => ({
+      name: r.nama?.split(" ")[0] ?? "—",
+      km: r.total_km || 0,
+    })), [riders]);
+
+  const barData = useMemo(() =>
+    JABATAN_LIST
+      .map((j) => ({ name: j === "LIFE MEMBER" ? "L.MBR" : j, count: riders.filter((r) => r.jabatan?.toUpperCase() === j).length }))
+      .filter((d) => d.count > 0),
+  [riders]);
+
+  const tahunList = useMemo(() => {
+    const years = [...new Set(riders.map((r) => r.bergabung?.split("-")[0]).filter(Boolean))].sort().reverse();
+    return years;
+  }, [riders]);
+
+  const filtered = useMemo(() => {
+    let result = [...riders];
+    if (search) {
+      const q = search.toLowerCase();
+      result = result.filter((r) => r.nama?.toLowerCase().includes(q) || r.alamat?.toLowerCase().includes(q) || r.aktivitas?.toLowerCase().includes(q));
+    }
+    if (filterJabatan) result = result.filter((r) => r.jabatan?.toUpperCase() === filterJabatan);
+    if (filterTahun) result = result.filter((r) => r.bergabung?.startsWith(filterTahun));
+    result.sort((a, b) => {
+      let av: string | number = "", bv: string | number = "";
+      if (sortKey === "runs") { av = parseRuns(a.aktivitas).length; bv = parseRuns(b.aktivitas).length; }
+      else { av = (a as unknown as Record<string, unknown>)[sortKey] as string | number ?? ""; bv = (b as unknown as Record<string, unknown>)[sortKey] as string | number ?? ""; }
+      if (av < bv) return sortDir === "asc" ? -1 : 1;
+      if (av > bv) return sortDir === "asc" ? 1 : -1;
+      return 0;
+    });
+    return result;
+  }, [riders, search, filterJabatan, filterTahun, sortKey, sortDir]);
+
+  function handleSort(key: SortKey) {
+    if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(key); setSortDir("asc"); }
+  }
+
+  function handleExport() {
+    const bom = "\uFEFF";
+    const headers = ["No", "Nama", "Chapter", "TTL", "Bergabung", "Jabatan", "Total KM", "Runs"];
+    const rows = filtered.map((r) => [r.no, r.nama, r.alamat, r.ttl, r.bergabung, r.jabatan, r.total_km, parseRuns(r.aktivitas).length]);
+    const csv = bom + [headers, ...rows].map((row) => row.map((v) => `"${v ?? ""}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "revolt-riders.csv"; a.click();
+    URL.revokeObjectURL(url);
+    toast.success("CSV exported!");
+  }
+
+  function ThCol({ label, col }: { label: string; col: SortKey }) {
+    const isActive = sortKey === col;
+    return (
+      <th className={cn("th-sort px-3 py-3 text-left text-[0.65rem] font-medium uppercase tracking-wider whitespace-nowrap", isActive ? "active" : "text-[#71717A]")}
+        onClick={() => handleSort(col)}>
+        <span className="flex items-center gap-1">
+          {label}
+          {isActive ? (sortDir === "asc" ? <ChevronUp size={10} /> : <ChevronDown size={10} />) : <ChevronUp size={10} className="opacity-20" />}
+        </span>
+      </th>
+    );
+  }
+
+  const activeFilterCount = [filterJabatan, filterTahun].filter(Boolean).length;
+
+  const topbarActions = (
+    <>
+      <button onClick={handleExport} disabled={loading || !riders.length}
+        className="btn-purple flex items-center gap-2 px-3 py-2 text-[0.72rem] font-medium disabled:opacity-40">
+        <ArrowDownToLine size={13} />
+        <span className="hidden sm:inline">Export</span>
+      </button>
+    </>
+  );
+
+  return (
+    <div className="flex flex-1 flex-col overflow-auto">
+      <Topbar
+        title="Dashboard"
+        subtitle={!loading ? `${riders.length} riders · Revolt Riders MC` : "Loading..."}
+        onRefresh={fetchRiders}
+        loading={loading}
+        actions={topbarActions}
+        onMenuOpen={onMenuOpen}
+      />
+
+      <div className="flex-1 overflow-auto px-3 md:px-6 py-4 md:py-6 w-full max-w-[1440px] mx-auto">
+        {/* Error */}
+        {!loading && error && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+            className="mb-5 rounded-2xl border border-red-500/20 bg-red-500/10 p-5 text-center">
+            <p className="mb-3 text-sm text-red-400">{error}</p>
+            <button onClick={fetchRiders} className="btn-ghost px-4 py-2 text-[0.75rem] text-red-400">Retry</button>
+          </motion.div>
+        )}
+
+        {/* Stat Cards — 2 cols mobile, 3 tablet, 6 desktop */}
+        <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+          {loading ? (
+            Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} />)
+          ) : stats ? (
+            <>
+              <StatCard label="Total Riders" value={riders.length} icon={Users2} color="blue" sparkline={[18,20,22,23,24,25,26,27]} delay={0} />
+              <StatCard label="Total KM" value={stats.totalKm} suffix=" km" icon={Navigation2} color="purple" sparkline={sparklineKm} delay={0.05} />
+              <StatCard label="Avg KM" value={stats.avgKm} suffix=" km" icon={Activity} color="green" sub="per rider" delay={0.1} />
+              <StatCard label="Road Captain" value={stats.topRider?.total_km ?? 0} suffix=" km" icon={Flame} color="amber" sub={stats.topRider?.nama?.split(" ")[0]} delay={0.15} />
+              <StatCard label="Total Runs" value={stats.runs} icon={Timer} color="cyan" delay={0.2} />
+              <StatCard label="Founders" value={stats.founders} icon={Gem} color="red" sub="founding members" delay={0.25} />
+            </>
+          ) : null}
+        </div>
+
+        {/* Announcement Banner */}
+        <AnnouncementBanner />
+
+        {/* Charts — stack on mobile */}
+        <div className="mb-5 grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+            transition={{ duration: 0.2, delay: 0.12 }} className="glass-card p-4 md:p-6 lg:col-span-2">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h3 className="text-[0.82rem] md:text-[0.88rem] font-semibold text-white">Top 15 Riders by Distance</h3>
+                <p className="mt-0.5 text-[0.66rem] text-[#71717A]">Total kilometers ridden</p>
+              </div>
+              <span className="badge-purple hidden sm:inline">KM Ranking</span>
+            </div>
+            {loading ? <div className="skeleton h-44 w-full rounded-xl" /> : (
+              <ResponsiveContainer width="100%" height={180}>
+                <AreaChart data={areaData} margin={{ top: 4, right: 4, left: -24, bottom: 44 }}>
+                  <defs>
+                    <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#8B5CF6" stopOpacity={0.35} />
+                      <stop offset="100%" stopColor="#8B5CF6" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(39,39,42,0.6)" vertical={false} />
+                  <XAxis dataKey="name" tick={{ fontSize: 9, fill: "#71717A", fontFamily: "Inter" }}
+                    angle={-40} textAnchor="end" interval={0} tickLine={false} axisLine={false} />
+                  <YAxis tick={{ fontSize: 9, fill: "#71717A", fontFamily: "Inter" }} tickLine={false} axisLine={false} />
+                  <Tooltip content={<ChartTooltip />} cursor={{ stroke: "rgba(139,92,246,0.2)", strokeWidth: 1 }} />
+                  <Area type="monotone" dataKey="km" stroke="#8B5CF6" strokeWidth={2} fill="url(#areaGrad)"
+                    dot={{ r: 2.5, fill: "#8B5CF6", strokeWidth: 0 }} activeDot={{ r: 4.5, fill: "#A855F7", strokeWidth: 0 }}
+                    isAnimationActive={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+          </motion.div>
+
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+            transition={{ duration: 0.2, delay: 0.16 }} className="glass-card p-4 md:p-6">
+            <div className="mb-3">
+              <h3 className="text-[0.82rem] md:text-[0.88rem] font-semibold text-white">Rank Distribution</h3>
+              <p className="mt-0.5 text-[0.66rem] text-[#71717A]">Members by jabatan</p>
+            </div>
+            {loading ? <div className="skeleton h-44 w-full rounded-xl" /> : (
+              <ResponsiveContainer width="100%" height={180}>
+                <BarChart data={barData} margin={{ top: 4, right: 0, left: -28, bottom: 44 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(39,39,42,0.6)" vertical={false} />
+                  <XAxis dataKey="name" tick={{ fontSize: 8, fill: "#71717A", fontFamily: "Inter" }}
+                    angle={-35} textAnchor="end" interval={0} tickLine={false} axisLine={false} />
+                  <YAxis tick={{ fontSize: 9, fill: "#71717A", fontFamily: "Inter" }} tickLine={false} axisLine={false} allowDecimals={false} />
+                  <Tooltip content={({ active, payload }: { active?: boolean; payload?: { value: number }[] }) =>
+                    active && payload?.length ? (
+                      <div className="rounded-xl border border-[rgba(39,39,42,0.8)] bg-[#1E1E1E] px-3 py-2">
+                        <p className="text-sm font-semibold text-white">{payload[0].value} riders</p>
+                      </div>
+                    ) : null} cursor={{ fill: "rgba(139,92,246,0.06)" }} />
+                  <Bar dataKey="count" radius={[5, 5, 0, 0]} isAnimationActive={false}>
+                    {barData.map((_, i) => <Cell key={i} fill={i % 2 === 0 ? "#8B5CF6" : "#A855F7"} opacity={0.85 - i * 0.05} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </motion.div>
+        </div>
+
+        {/* Member List */}
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+          transition={{ duration: 0.2, delay: 0.2 }} className="glass-card overflow-hidden">
+          {/* Toolbar */}
+          <div className="border-b border-[rgba(39,39,42,0.6)] px-4 py-3">
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1 min-w-0">
+                <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#71717A]" />
+                <input type="search" placeholder="Search riders..."
+                  value={search} onChange={(e) => setSearch(e.target.value)}
+                  className="input-dark w-full pl-9 pr-3 py-2.5 text-[0.8rem]" />
+              </div>
+              {/* Mobile: filter button */}
+              <button onClick={() => setFilterOpen(true)}
+                className={cn("btn-ghost flex items-center gap-1.5 px-3 py-2.5 text-[0.75rem] relative flex-shrink-0",
+                  activeFilterCount > 0 && "border-[#8B5CF6]/40 text-[#8B5CF6]")}>
+                <SlidersHorizontal size={14} />
+                <span className="hidden sm:inline">Filter</span>
+                {activeFilterCount > 0 && (
+                  <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-[#8B5CF6] text-[0.55rem] text-white">
+                    {activeFilterCount}
+                  </span>
+                )}
+              </button>
+              {/* Desktop: inline filters */}
+              <div className="hidden md:flex items-center gap-2">
+                <select value={filterJabatan} onChange={(e) => setFilterJabatan(e.target.value)}
+                  className="input-dark px-3 py-2.5 text-[0.78rem] cursor-pointer">
+                  <option value="">All Ranks</option>
+                  {JABATAN_LIST.map((j) => <option key={j}>{j}</option>)}
+                </select>
+                <select value={filterTahun} onChange={(e) => setFilterTahun(e.target.value)}
+                  className="input-dark px-3 py-2.5 text-[0.78rem] cursor-pointer">
+                  <option value="">All Years</option>
+                  {tahunList.map((y) => <option key={y}>{y}</option>)}
+                </select>
+              </div>
+              {/* View toggle */}
+              <div className="flex items-center rounded-xl border border-[rgba(39,39,42,0.8)] overflow-hidden flex-shrink-0">
+                <button onClick={() => setViewMode("cards")}
+                  className={cn("flex h-9 w-9 items-center justify-center transition-colors",
+                    viewMode === "cards" ? "bg-[#8B5CF6]/20 text-[#8B5CF6]" : "text-[#71717A] hover:text-white")}>
+                  <LayoutGrid size={14} />
+                </button>
+                <button onClick={() => setViewMode("table")}
+                  className={cn("flex h-9 w-9 items-center justify-center transition-colors",
+                    viewMode === "table" ? "bg-[#8B5CF6]/20 text-[#8B5CF6]" : "text-[#71717A] hover:text-white")}>
+                  <Rows3 size={14} />
+                </button>
+              </div>
+            </div>
+            <div className="mt-2 flex items-center justify-between">
+              <div className="flex gap-1 flex-wrap">
+                {filterJabatan && (
+                  <button onClick={() => setFilterJabatan("")}
+                    className="flex items-center gap-1 badge-purple cursor-pointer hover:opacity-80">
+                    {filterJabatan} <X size={10} />
+                  </button>
+                )}
+                {filterTahun && (
+                  <button onClick={() => setFilterTahun("")}
+                    className="flex items-center gap-1 badge-purple cursor-pointer hover:opacity-80">
+                    {filterTahun} <X size={10} />
+                  </button>
+                )}
+              </div>
+              <span className="text-[0.7rem] text-[#71717A] flex-shrink-0">
+                {filtered.length}<span className="text-[#52525B]">/{riders.length}</span>
+              </span>
+            </div>
+          </div>
+
+          {/* Card view (default on mobile) */}
+          {viewMode === "cards" && (
+            <div className="p-3 space-y-2">
+              {loading ? (
+                Array.from({ length: 5 }).map((_, i) => <div key={i} className="skeleton h-24 rounded-2xl" />)
+              ) : filtered.length === 0 ? (
+                <p className="py-12 text-center text-[0.8rem] text-[#71717A]">No riders found</p>
+              ) : (
+                filtered.map((rider) => (
+                  <RiderCard key={rider.id} rider={rider} onClick={() => setSelectedRider(rider)} />
+                ))
+              )}
+            </div>
+          )}
+
+          {/* Table view */}
+          {viewMode === "table" && (
+            <div className="overflow-x-auto">
+              {loading ? (
+                <div className="p-4 space-y-2">
+                  {Array.from({ length: 6 }).map((_, i) => <div key={i} className="skeleton h-10 rounded-xl" />)}
+                </div>
+              ) : (
+                <table className="w-full min-w-[680px]">
+                  <thead>
+                    <tr className="border-b border-[rgba(39,39,42,0.6)] bg-[rgba(255,255,255,0.02)]">
+                      <ThCol label="#" col="no" />
+                      <ThCol label="Rider" col="nama" />
+                      <ThCol label="Chapter" col="alamat" />
+                      <ThCol label="Rank" col="jabatan" />
+                      <ThCol label="KM" col="total_km" />
+                      <ThCol label="Runs" col="runs" />
+                      <ThCol label="Patched" col="bergabung" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.length === 0 ? (
+                      <tr><td colSpan={7} className="py-14 text-center text-[0.8rem] text-[#71717A]">No riders found</td></tr>
+                    ) : (
+                      filtered.map((rider, i) => (
+                        <motion.tr key={rider.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                          transition={{ delay: Math.min(i * 0.008, 0.15) }}
+                          className="trow" onClick={() => setSelectedRider(rider)}>
+                          <td className="px-3 py-3 text-[0.72rem] font-medium text-[#52525B]">{rider.no}</td>
+                          <td className="px-3 py-3 text-[0.8rem] font-medium text-white">{rider.nama}</td>
+                          <td className="px-3 py-3 text-[0.75rem] text-[#A1A1AA] max-w-[140px] truncate">{rider.alamat || "—"}</td>
+                          <td className="px-3 py-3"><span className={rankBadgeClass(rider.jabatan)}>{rider.jabatan}</span></td>
+                          <td className="px-3 py-3 text-[0.82rem] font-semibold text-[#8B5CF6]">{numFmt(rider.total_km || 0)}</td>
+                          <td className="px-3 py-3"><RunsCell aktivitas={rider.aktivitas} /></td>
+                          <td className="px-3 py-3 text-[0.72rem] text-[#71717A]">{rider.bergabung || "—"}</td>
+                        </motion.tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+        </motion.div>
+
+        <p className="mt-5 text-center text-[0.62rem] text-[#52525B] tracking-widest uppercase pb-4">
+          Revolt Riders MC — Mandatory Ride
+        </p>
+      </div>
+
+      {/* Mobile filter drawer */}
+      <FilterDrawer
+        open={filterOpen} onClose={() => setFilterOpen(false)}
+        filterJabatan={filterJabatan} setFilterJabatan={setFilterJabatan}
+        filterTahun={filterTahun} setFilterTahun={setFilterTahun}
+        tahunList={tahunList}
+      />
+
+      {selectedRider && <RiderModal rider={selectedRider} onClose={() => setSelectedRider(null)} />}
+    </div>
+  );
+}
